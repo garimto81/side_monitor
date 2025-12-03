@@ -1,6 +1,6 @@
 # Side Monitor
 
-개발 중 실시간 서버 상태를 모니터링하기 위한 도구 모음입니다.
+Docker 컨테이너 및 호스트 프로세스를 자동으로 감지하여 Uptime Kuma에 모니터로 등록하는 도구입니다.
 
 ## 구성
 
@@ -9,7 +9,8 @@ side_monitor/
 ├── README.md                      # 이 파일
 ├── SERVER_MONITORING_TOOLS.md     # 모니터링 솔루션 비교 가이드
 ├── UPTIME_KUMA_SETUP.md           # Uptime Kuma 설치 가이드
-├── auto_register.py               # Docker 컨테이너 자동 등록 스크립트
+├── auto_register.py               # 자동 등록 스크립트
+├── requirements.txt               # Python 의존성
 ├── .env                           # 환경 변수 (gitignore)
 └── .env.example                   # 환경 변수 예시
 ```
@@ -39,13 +40,16 @@ cp .env.example .env
 
 ```powershell
 # 의존성 설치
-pip install uptime-kuma-api python-dotenv
+pip install -r requirements.txt
 
-# 실행 중인 Docker 컨테이너 미리보기 (등록 안함)
+# Docker 컨테이너 미리보기
 python auto_register.py --dry-run
 
+# 호스트 프로세스 포함 미리보기
+python auto_register.py --include-host --dry-run
+
 # 실제 등록
-python auto_register.py
+python auto_register.py --include-host
 
 # 등록된 모니터 목록 확인
 python auto_register.py --list
@@ -56,10 +60,23 @@ python auto_register.py --list
 | 기능 | 설명 |
 |------|------|
 | Docker 컨테이너 자동 감지 | `docker ps`로 실행 중인 컨테이너 스캔 |
+| 호스트 프로세스 감지 | Python 서버 등 직접 실행 중인 프로세스 스캔 |
 | 포트 타입 자동 판단 | HTTP vs TCP 자동 구분 |
 | Uptime Kuma API 연동 | 모니터 자동 등록 |
 | 중복 방지 | 이미 등록된 모니터는 스킵 |
 | 원격 호스트 지원 | 동일 네트워크의 다른 서버에서 모니터링 가능 |
+| 라벨 필터링 | 특정 라벨의 컨테이너만 필터링 |
+
+### CLI 옵션
+
+| 옵션 | 설명 |
+|------|------|
+| `--dry-run` | 등록하지 않고 미리보기만 |
+| `--list` | 현재 등록된 모니터 목록 |
+| `--host <IP>` | 모니터링 대상 호스트 IP 지정 |
+| `--include-host` | 호스트 프로세스도 포함 |
+| `--host-only` | 호스트 프로세스만 (Docker 제외) |
+| `--label <라벨>` | 라벨로 컨테이너 필터링 |
 
 ### 포트 타입 자동 판단
 
@@ -94,11 +111,45 @@ python auto_register.py --host 192.168.1.100 --dry-run
 
 **주의**: 원격 호스트 사용 시 해당 IP의 포트가 방화벽에서 열려 있어야 합니다.
 
+## 주기적 실행 (자동화)
+
+스크립트를 주기적으로 실행하여 새로운 컨테이너/프로세스를 자동 등록할 수 있습니다.
+
+### Windows Task Scheduler
+
+```powershell
+# 5분마다 실행하는 작업 생성
+$action = New-ScheduledTaskAction -Execute "python" -Argument "D:\AI\claude01\side_monitor\auto_register.py --include-host"
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+Register-ScheduledTask -TaskName "SideMonitor" -Action $action -Trigger $trigger
+```
+
+### Linux Cron
+
+```bash
+# crontab -e
+*/5 * * * * cd /path/to/side_monitor && python auto_register.py --include-host
+```
+
 ## 주의사항
 
 - `.env` 파일에 비밀번호가 포함되어 있으므로 `.gitignore`에 추가 권장
-- 스크립트는 1회성 실행, 주기적 실행이 필요하면 Task Scheduler 사용
+- 중복 모니터는 자동으로 스킵됨
 - Uptime Kuma는 단일 인스턴스로 운영 (클러스터링 미지원)
+
+## 트러블슈팅
+
+### Windows port proxy 문제
+
+외부에서 접속이 안 되는 경우 port proxy 규칙 확인:
+
+```powershell
+# port proxy 규칙 확인
+netsh interface portproxy show all
+
+# 문제가 있는 규칙 삭제
+netsh interface portproxy delete v4tov4 listenport=3001 listenaddress=0.0.0.0
+```
 
 ## 문서
 

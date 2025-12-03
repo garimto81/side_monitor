@@ -1,0 +1,3 @@
+uptime-kuma-api>=1.0.0
+python-dotenv>=1.0.0
+psutil>=5.9.0
