@@ -79,6 +79,7 @@ python auto_register.py --list
 | `--label <라벨>` | 라벨로 컨테이너 필터링 |
 | `--watch` | 주기적 감시 모드 (데몬) |
 | `--interval <초>` | 감시 주기 (기본: 300초) |
+| `--auto-cleanup` | 오프라인 모니터 자동 삭제 |
 
 ### 포트 타입 자동 판단
 
@@ -124,11 +125,14 @@ python auto_register.py --watch --include-host
 # 60초 주기로 감시
 python auto_register.py --watch --interval 60
 
-# 미리보기 모드로 감시 (실제 등록 안함)
-python auto_register.py --watch --dry-run
+# 감시 + 오프라인 모니터 자동 삭제
+python auto_register.py --watch --include-host --auto-cleanup
+
+# 미리보기 모드로 감시 (실제 등록/삭제 안함)
+python auto_register.py --watch --auto-cleanup --dry-run
 
 # 백그라운드 실행 (PowerShell)
-Start-Process python -ArgumentList "auto_register.py --watch --include-host" -WindowStyle Hidden
+Start-Process python -ArgumentList "auto_register.py --watch --include-host --auto-cleanup" -WindowStyle Hidden
 
 # 종료: Ctrl+C (graceful shutdown)
 ```
@@ -137,6 +141,13 @@ Start-Process python -ArgumentList "auto_register.py --watch --include-host" -Wi
 - Ctrl+C로 안전하게 종료 (현재 사이클 완료 후 종료)
 - 새로운 컨테이너/프로세스만 등록 (중복 스킵)
 - 오류 발생 시 다음 사이클 계속 진행
+- `--auto-cleanup`: 오프라인 서비스 모니터 자동 삭제
+
+**Auto Cleanup 동작:**
+- 자동 등록된 모니터만 삭제 대상 (수동 등록 모니터는 보존)
+- 이름 패턴으로 자동 등록 여부 판단:
+  - Docker: `{container_name}:{port}` 또는 `{container_name}:{port} (TCP)`
+  - Host: `[Host] {process_name}:{port}` 또는 `[Host] {process_name}:{port} (TCP)`
 
 ## 외부 스케줄러 사용 (대안)
 

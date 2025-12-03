@@ -10,6 +10,8 @@ Docker 컨테이너 및 호스트 프로세스 자동 감지 및 Uptime Kuma 모
     python auto_register.py --label <라벨>  # 라벨로 컨테이너 필터링
     python auto_register.py --watch      # 주기적 감시 모드 (기본 300초)
     python auto_register.py --watch --interval 60  # 60초마다 감시
+    python auto_register.py --auto-cleanup  # 오프라인 모니터 자동 삭제
+    python auto_register.py --watch --auto-cleanup  # 감시 + 자동 정리
 """
 
 import subprocess
@@ -506,14 +508,95 @@ async def list_existing_monitors():
         print("   Install: pip install uptime-kuma-api")
 
 
+def is_auto_registered_monitor(name: str) -> bool:
+    """자동 등록된 모니터인지 확인 (이름 패턴으로 판단)
+
+    자동 등록 패턴:
+    - Docker: "{container_name}:{port}" 또는 "{container_name}:{port} (TCP)"
+    - Host: "[Host] {process_name}:{port}" 또는 "[Host] {process_name}:{port} (TCP)"
+    """
+    import re
+    # Docker 컨테이너 패턴: name:port 또는 name:port (TCP)
+    docker_pattern = r"^[a-zA-Z0-9_-]+:\d+( \(TCP\))?$"
+    # 호스트 프로세스 패턴: [Host] name:port 또는 [Host] name:port (TCP)
+    host_pattern = r"^\[Host\] .+:\d+( \(TCP\))?$"
+
+    return bool(re.match(docker_pattern, name) or re.match(host_pattern, name))
+
+
+async def cleanup_offline_monitors(
+    active_monitor_names: set[str],
+    dry_run: bool = False,
+    quiet: bool = False
+) -> int:
+    """오프라인 모니터 삭제 (Uptime Kuma에서 더 이상 실행되지 않는 서비스 제거)
+
+    Args:
+        active_monitor_names: 현재 실행 중인 모니터 이름 집합
+        dry_run: 미리보기 모드
+        quiet: 출력 최소화
+
+    Returns:
+        삭제된 모니터 수
+    """
+    try:
+        from uptime_kuma_api import UptimeKumaApi
+
+        api = UptimeKumaApi(KUMA_URL)
+        api.login(KUMA_USERNAME, KUMA_PASSWORD)
+
+        existing = api.get_monitors()
+        deleted = 0
+
+        for m in existing:
+            name = m["name"]
+            monitor_id = m["id"]
+
+            # 자동 등록된 모니터만 대상으로 함
+            if not is_auto_registered_monitor(name):
+                continue
+
+            # 현재 실행 중이면 스킵
+            if name in active_monitor_names:
+                continue
+
+            # 오프라인 모니터 삭제
+            if dry_run:
+                if not quiet:
+                    print(f"[DRY-RUN] Would delete: {name}")
+                deleted += 1
+            else:
+                try:
+                    api.delete_monitor(monitor_id)
+                    if not quiet:
+                        print(f"[DELETED] {name}")
+                    deleted += 1
+                except Exception as e:
+                    if not quiet:
+                        print(f"[FAIL] Delete {name} - {e}")
+
+        api.disconnect()
+
+        if deleted > 0 and not quiet:
+            print(f"\nCleanup: {deleted} offline monitor(s) {'would be ' if dry_run else ''}removed")
+
+        return deleted
+
+    except ImportError:
+        if not quiet:
+            print("[WARN] uptime-kuma-api library required for cleanup.")
+        return 0
+
+
 def scan_and_register(
     target_host: str,
     include_host: bool = False,
     host_only: bool = False,
     label_filter: str = None,
     dry_run: bool = False,
-    quiet: bool = False
-) -> int:
+    quiet: bool = False,
+    auto_cleanup: bool = False
+) -> tuple[int, int]:
     """컨테이너/프로세스 스캔 및 모니터 등록
 
     Args:
@@ -523,9 +606,10 @@ def scan_and_register(
         label_filter: Docker 라벨 필터
         dry_run: 미리보기 모드
         quiet: 출력 최소화 (watch 모드용)
+        auto_cleanup: 오프라인 모니터 자동 삭제
 
     Returns:
-        등록된 모니터 수
+        (등록된 모니터 수, 삭제된 모니터 수) 튜플
     """
     all_monitors = []
     containers = []
@@ -555,10 +639,21 @@ def scan_and_register(
             monitor = generate_monitor_config_for_process(p, host=target_host)
             all_monitors.append(monitor)
 
+    # 현재 활성 모니터 이름 집합 (cleanup용)
+    active_monitor_names = {m["name"] for m in all_monitors}
+
     if not containers and not processes:
         if not quiet:
             print("No running Docker containers or host processes found.")
-        return 0
+        # cleanup만 수행 (컨테이너/프로세스가 없어도 기존 모니터 정리)
+        deleted = 0
+        if auto_cleanup:
+            deleted = asyncio.run(cleanup_offline_monitors(
+                active_monitor_names=set(),
+                dry_run=dry_run,
+                quiet=quiet
+            ))
+        return (0, deleted)
 
     if not quiet:
         print(f"\nTarget host: {target_host}")
@@ -566,24 +661,39 @@ def scan_and_register(
     if not all_monitors:
         if not quiet:
             print("\nNo ports to monitor.")
-        return 0
+        return (0, 0)
 
     # 생성할 모니터 출력
     if not quiet:
         print_monitors_to_create(all_monitors)
 
     # 등록
+    registered = 0
     if dry_run:
         if not quiet:
             print("\n[DRY-RUN] No actual registration performed.")
-        return 0
     else:
         if not quiet:
             print("\n" + "=" * 60)
             print("Registering monitors to Uptime Kuma...")
             print("=" * 60)
         asyncio.run(register_monitors_via_api(all_monitors))
-        return len(all_monitors)
+        registered = len(all_monitors)
+
+    # 오프라인 모니터 정리
+    deleted = 0
+    if auto_cleanup:
+        if not quiet:
+            print("\n" + "=" * 60)
+            print("Cleaning up offline monitors...")
+            print("=" * 60)
+        deleted = asyncio.run(cleanup_offline_monitors(
+            active_monitor_names=active_monitor_names,
+            dry_run=dry_run,
+            quiet=quiet
+        ))
+
+    return (registered, deleted)
 
 
 def _signal_handler(signum, frame):
@@ -599,7 +709,8 @@ def watch_loop(
     include_host: bool = False,
     host_only: bool = False,
     label_filter: str = None,
-    dry_run: bool = False
+    dry_run: bool = False,
+    auto_cleanup: bool = False
 ):
     """주기적 감시 루프
 
@@ -610,6 +721,7 @@ def watch_loop(
         host_only: 호스트 프로세스만 스캔
         label_filter: Docker 라벨 필터
         dry_run: 미리보기 모드
+        auto_cleanup: 오프라인 모니터 자동 삭제
     """
     global _shutdown_requested
 
@@ -625,10 +737,11 @@ def watch_loop(
     print(f"  Interval: {interval} seconds")
     print(f"  Include host processes: {include_host}")
     print(f"  Host only: {host_only}")
+    print(f"  Auto cleanup: {auto_cleanup}")
     if label_filter:
         print(f"  Label filter: {label_filter}")
     if dry_run:
-        print("  Mode: DRY-RUN (no actual registration)")
+        print("  Mode: DRY-RUN (no actual registration/deletion)")
     print("\nPress Ctrl+C to stop.\n")
 
     cycle = 0
@@ -639,15 +752,19 @@ def watch_loop(
         print(f"\n[{timestamp}] Cycle #{cycle} - Scanning...")
 
         try:
-            registered = scan_and_register(
+            registered, deleted = scan_and_register(
                 target_host=target_host,
                 include_host=include_host,
                 host_only=host_only,
                 label_filter=label_filter,
                 dry_run=dry_run,
-                quiet=True  # watch 모드에서는 간결한 출력
+                quiet=True,  # watch 모드에서는 간결한 출력
+                auto_cleanup=auto_cleanup
             )
-            print(f"[{timestamp}] Cycle #{cycle} - Done. Checked/registered: {registered}")
+            status = f"registered: {registered}"
+            if auto_cleanup:
+                status += f", deleted: {deleted}"
+            print(f"[{timestamp}] Cycle #{cycle} - Done. {status}")
         except Exception as e:
             print(f"[{timestamp}] Cycle #{cycle} - Error: {e}")
 
@@ -678,6 +795,8 @@ def main():
                         help="주기적 감시 모드")
     parser.add_argument("--interval", type=int, default=300,
                         help="감시 주기 (초, 기본: 300)")
+    parser.add_argument("--auto-cleanup", action="store_true",
+                        help="오프라인 모니터 자동 삭제")
     args = parser.parse_args()
 
     if args.list:
@@ -695,7 +814,8 @@ def main():
             include_host=args.include_host,
             host_only=args.host_only,
             label_filter=args.label,
-            dry_run=args.dry_run
+            dry_run=args.dry_run,
+            auto_cleanup=args.auto_cleanup
         )
         return
 
@@ -706,7 +826,8 @@ def main():
         host_only=args.host_only,
         label_filter=args.label,
         dry_run=args.dry_run,
-        quiet=False
+        quiet=False,
+        auto_cleanup=args.auto_cleanup
     )
 
 
