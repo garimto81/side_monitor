@@ -12,10 +12,33 @@ import json
 import asyncio
 import argparse
 import re
+import shutil
 from dataclasses import dataclass
 from typing import Optional
 import os
 from dotenv import load_dotenv
+
+
+def find_docker_executable() -> str:
+    """Docker 실행 파일 경로 찾기"""
+    # 1. PATH에서 찾기
+    docker_path = shutil.which("docker")
+    if docker_path:
+        return docker_path
+
+    # 2. Windows 기본 설치 경로들
+    common_paths = [
+        r"C:\Program Files\Docker\Docker\resources\bin\docker.exe",
+        r"C:\ProgramData\DockerDesktop\version-bin\docker.exe",
+        os.path.expandvars(r"%USERPROFILE%\AppData\Local\Docker\wsl\docker.exe"),
+    ]
+
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+
+    # 3. 못 찾으면 기본값 (PATH에 의존)
+    return "docker"
 
 # .env 파일 로드
 load_dotenv()
@@ -42,8 +65,9 @@ class ContainerInfo:
 def get_docker_containers() -> list[ContainerInfo]:
     """실행 중인 Docker 컨테이너 목록 조회"""
     try:
+        docker_cmd = find_docker_executable()
         result = subprocess.run(
-            ["docker", "ps", "--format", "{{json .}}"],
+            [docker_cmd, "ps", "--format", "{{json .}}"],
             capture_output=True,
             text=True,
             check=True,
@@ -81,6 +105,8 @@ def get_docker_containers() -> list[ContainerInfo]:
         return containers
     except subprocess.CalledProcessError as e:
         print(f"Error running docker ps: {e}")
+        if e.stderr:
+            print(f"  Detail: {e.stderr.strip()}")
         return []
 
 
