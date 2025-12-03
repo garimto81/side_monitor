@@ -563,6 +563,10 @@ def cleanup_offline_monitors_with_api(
 ) -> int:
     """API 연결을 사용하여 오프라인 모니터 삭제 (단일 연결 재사용)
 
+    삭제 대상:
+    1. 프로세스가 더 이상 실행되지 않는 모니터 (active_monitor_names에 없음)
+    2. Uptime Kuma에서 다운 상태인 모니터 (heartbeat 기준)
+
     Args:
         api: UptimeKumaApi 인스턴스 (이미 로그인됨)
         active_monitor_names: 현재 실행 중인 모니터 이름 집합
@@ -575,6 +579,12 @@ def cleanup_offline_monitors_with_api(
     existing = api.get_monitors()
     deleted = 0
 
+    # heartbeat 정보 가져오기 (모니터 상태 확인용)
+    try:
+        heartbeats = api.get_important_heartbeats()
+    except Exception:
+        heartbeats = {}
+
     for m in existing:
         name = m["name"]
         monitor_id = m["id"]
@@ -583,20 +593,37 @@ def cleanup_offline_monitors_with_api(
         if not is_auto_registered_monitor(name):
             continue
 
-        # 현재 실행 중이면 스킵
-        if name in active_monitor_names:
+        # 삭제 조건 확인
+        should_delete = False
+        reason = ""
+
+        # 조건 1: 프로세스가 더 이상 실행되지 않음
+        if name not in active_monitor_names:
+            should_delete = True
+            reason = "process not running"
+        else:
+            # 조건 2: Uptime Kuma에서 다운 상태 (heartbeat 확인)
+            monitor_heartbeats = heartbeats.get(monitor_id, [])
+            if monitor_heartbeats:
+                # 최근 heartbeat 상태 확인 (status: 0=down, 1=up)
+                latest = monitor_heartbeats[0] if monitor_heartbeats else None
+                if latest and latest.get("status") == 0:
+                    should_delete = True
+                    reason = "down in Uptime Kuma"
+
+        if not should_delete:
             continue
 
         # 오프라인 모니터 삭제
         if dry_run:
             if not quiet:
-                print(f"[DRY-RUN] Would delete: {name}")
+                print(f"[DRY-RUN] Would delete: {name} ({reason})")
             deleted += 1
         else:
             try:
                 api.delete_monitor(monitor_id)
                 if not quiet:
-                    print(f"[DELETED] {name}")
+                    print(f"[DELETED] {name} ({reason})")
                 deleted += 1
             except Exception as e:
                 if not quiet:
