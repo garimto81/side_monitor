@@ -721,7 +721,7 @@ def scan_and_register(
     else:
         # 실제 등록 + cleanup (단일 연결)
         try:
-            with kuma_api_connection(debug=verbose) as api:
+            with kuma_api_connection() as api:
                 if not quiet:
                     print("\n" + "=" * 60)
                     print("Registering monitors to Uptime Kuma...")
