@@ -1,10 +1,12 @@
 """
-Docker 컨테이너 자동 감지 및 Uptime Kuma 모니터 등록 스크립트
+Docker 컨테이너 및 호스트 프로세스 자동 감지 및 Uptime Kuma 모니터 등록 스크립트
 
 사용법:
-    python auto_register.py              # 실행 중인 컨테이너 스캔 및 등록
+    python auto_register.py              # Docker 컨테이너 스캔 및 등록
     python auto_register.py --dry-run    # 등록하지 않고 미리보기만
     python auto_register.py --list       # 현재 등록된 모니터 목록
+    python auto_register.py --include-host  # 호스트 프로세스도 포함
+    python auto_register.py --host-only     # 호스트 프로세스만
 """
 
 import subprocess
@@ -60,6 +62,80 @@ class ContainerInfo:
     ports: list[dict]
     status: str
     health: Optional[str] = None
+
+
+@dataclass
+class ProcessInfo:
+    """호스트 프로세스 정보"""
+    name: str
+    pid: int
+    port: int
+    cmdline: list[str]
+    status: str = "running"
+
+
+def get_host_processes(exclude_ports: list[int] = None) -> list[ProcessInfo]:
+    """호스트에서 실행 중인 리스닝 프로세스 목록 조회
+
+    Args:
+        exclude_ports: 제외할 포트 목록 (기본: 시스템 포트)
+    """
+    try:
+        import psutil
+    except ImportError:
+        print("[WARN] psutil library required for host process detection.")
+        print("   Install: pip install psutil")
+        return []
+
+    # 기본 제외 포트 (시스템 서비스)
+    if exclude_ports is None:
+        exclude_ports = [22, 135, 139, 445, 3389, 5040, 7680]
+
+    processes = []
+    seen_ports = set()
+
+    try:
+        for conn in psutil.net_connections(kind='inet'):
+            if conn.status != 'LISTEN':
+                continue
+
+            port = conn.laddr.port
+
+            # 제외 포트 및 중복 체크
+            if port in exclude_ports or port in seen_ports:
+                continue
+
+            # 1024 이하 시스템 포트 제외 (선택적)
+            if port < 1024:
+                continue
+
+            seen_ports.add(port)
+
+            try:
+                proc = psutil.Process(conn.pid)
+                cmdline = proc.cmdline()
+
+                # 프로세스 이름 결정
+                name = proc.name()
+                if 'python' in name.lower() and len(cmdline) > 1:
+                    # Python 스크립트인 경우 스크립트 이름 사용
+                    script = os.path.basename(cmdline[1]) if len(cmdline) > 1 else name
+                    name = f"python:{script}"
+
+                processes.append(ProcessInfo(
+                    name=name,
+                    pid=conn.pid,
+                    port=port,
+                    cmdline=cmdline,
+                    status="running"
+                ))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+    except psutil.AccessDenied:
+        print("[WARN] Access denied. Run as administrator for full process list.")
+
+    return processes
 
 
 def get_docker_containers() -> list[ContainerInfo]:
@@ -207,6 +283,62 @@ def generate_monitor_config(container: ContainerInfo, host: str = None) -> list[
     return monitors
 
 
+def generate_monitor_config_for_process(process: ProcessInfo, host: str = None) -> dict:
+    """프로세스 정보로 모니터 설정 생성
+
+    Args:
+        process: 호스트 프로세스 정보
+        host: 모니터링 대상 호스트
+    """
+    target_host = host or DOCKER_HOST_IP
+
+    # TCP 전용 포트 (데이터베이스, 캐시 등)
+    tcp_only_ports = [5432, 3306, 27017, 6379, 5379, 11211, 9042]
+
+    # HTTP 서비스로 추정되는 포트
+    http_ports = [80, 443, 3000, 3001, 4000, 5000, 5001, 8000, 8080, 8096, 8443, 9000, 8920]
+
+    port = process.port
+
+    if port in tcp_only_ports:
+        return {
+            "type": "port",
+            "name": f"[Host] {process.name}:{port} (TCP)",
+            "hostname": target_host,
+            "port": port,
+            "interval": 60,
+            "retryInterval": 60,
+            "maxretries": 3,
+        }
+    elif port in http_ports or port >= 3000:
+        monitor = {
+            "type": "http",
+            "name": f"[Host] {process.name}:{port}",
+            "url": f"http://{target_host}:{port}",
+            "method": "GET",
+            "interval": 60,
+            "retryInterval": 60,
+            "maxretries": 3,
+            "accepted_statuscodes": ["200-299", "300-399"],
+        }
+
+        # API/백엔드 프로세스는 /health 엔드포인트 시도
+        if "api" in process.name.lower() or "backend" in process.name.lower():
+            monitor["url"] = f"http://{target_host}:{port}/health"
+
+        return monitor
+    else:
+        return {
+            "type": "port",
+            "name": f"[Host] {process.name}:{port} (TCP)",
+            "hostname": target_host,
+            "port": port,
+            "interval": 60,
+            "retryInterval": 60,
+            "maxretries": 3,
+        }
+
+
 def print_container_summary(containers: list[ContainerInfo]):
     """컨테이너 요약 출력"""
     print("\n" + "=" * 60)
@@ -228,6 +360,23 @@ def print_container_summary(containers: list[ContainerInfo]):
         if c.ports:
             ports_str = ", ".join([f"{p['host_port']}" for p in c.ports])
             print(f"   Ports: {ports_str}")
+
+
+def print_process_summary(processes: list[ProcessInfo]):
+    """호스트 프로세스 요약 출력"""
+    print("\n" + "=" * 60)
+    print("Running Host Processes")
+    print("=" * 60)
+
+    for p in processes:
+        print(f"\n[HOST] {p.name}")
+        print(f"   PID: {p.pid}")
+        print(f"   Port: {p.port}")
+        if p.cmdline:
+            cmd_str = " ".join(p.cmdline[:3])
+            if len(p.cmdline) > 3:
+                cmd_str += " ..."
+            print(f"   Cmd: {cmd_str}")
 
 
 def print_monitors_to_create(monitors: list[dict]):
@@ -335,36 +484,57 @@ async def list_existing_monitors():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Docker 컨테이너 자동 Uptime Kuma 등록")
+    parser = argparse.ArgumentParser(description="Docker 컨테이너 및 호스트 프로세스 자동 Uptime Kuma 등록")
     parser.add_argument("--dry-run", action="store_true", help="등록하지 않고 미리보기만")
     parser.add_argument("--list", action="store_true", help="현재 등록된 모니터 목록")
     parser.add_argument("--host", type=str, default=None,
                         help="Docker 호스트 IP/hostname (기본: DOCKER_HOST_IP 환경변수 또는 localhost)")
+    parser.add_argument("--include-host", action="store_true",
+                        help="호스트 프로세스도 포함")
+    parser.add_argument("--host-only", action="store_true",
+                        help="호스트 프로세스만 (Docker 제외)")
     args = parser.parse_args()
 
     if args.list:
         asyncio.run(list_existing_monitors())
         return
 
-    # Docker 컨테이너 조회
-    containers = get_docker_containers()
-
-    if not containers:
-        print("No running Docker containers found.")
-        return
-
-    # 컨테이너 요약 출력
-    print_container_summary(containers)
-
     # 대상 호스트 결정
     target_host = args.host or DOCKER_HOST_IP
-    print(f"\nTarget host: {target_host}")
 
-    # 모니터 설정 생성
     all_monitors = []
-    for c in containers:
-        monitors = generate_monitor_config(c, host=target_host)
-        all_monitors.extend(monitors)
+    containers = []
+    processes = []
+
+    # Docker 컨테이너 조회 (--host-only가 아닌 경우)
+    if not args.host_only:
+        containers = get_docker_containers()
+        if containers:
+            print_container_summary(containers)
+            for c in containers:
+                monitors = generate_monitor_config(c, host=target_host)
+                all_monitors.extend(monitors)
+
+    # 호스트 프로세스 조회 (--include-host 또는 --host-only인 경우)
+    if args.include_host or args.host_only:
+        # Docker 컨테이너가 사용 중인 포트 제외
+        docker_ports = []
+        for c in containers:
+            for p in c.ports:
+                docker_ports.append(p["host_port"])
+
+        processes = get_host_processes(exclude_ports=docker_ports + [22, 135, 139, 445, 3389, 5040, 7680])
+        if processes:
+            print_process_summary(processes)
+            for p in processes:
+                monitor = generate_monitor_config_for_process(p, host=target_host)
+                all_monitors.append(monitor)
+
+    if not containers and not processes:
+        print("No running Docker containers or host processes found.")
+        return
+
+    print(f"\nTarget host: {target_host}")
 
     if not all_monitors:
         print("\nNo ports to monitor.")
