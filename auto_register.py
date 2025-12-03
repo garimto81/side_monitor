@@ -524,7 +524,7 @@ def is_auto_registered_monitor(name: str) -> bool:
     return bool(re.match(docker_pattern, name) or re.match(host_pattern, name))
 
 
-async def cleanup_offline_monitors(
+def cleanup_offline_monitors(
     active_monitor_names: set[str],
     dry_run: bool = False,
     quiet: bool = False
@@ -648,11 +648,11 @@ def scan_and_register(
         # cleanup만 수행 (컨테이너/프로세스가 없어도 기존 모니터 정리)
         deleted = 0
         if auto_cleanup:
-            deleted = asyncio.run(cleanup_offline_monitors(
+            deleted = cleanup_offline_monitors(
                 active_monitor_names=set(),
                 dry_run=dry_run,
                 quiet=quiet
-            ))
+            )
         return (0, deleted)
 
     if not quiet:
@@ -687,11 +687,11 @@ def scan_and_register(
             print("\n" + "=" * 60)
             print("Cleaning up offline monitors...")
             print("=" * 60)
-        deleted = asyncio.run(cleanup_offline_monitors(
+        deleted = cleanup_offline_monitors(
             active_monitor_names=active_monitor_names,
             dry_run=dry_run,
             quiet=quiet
-        ))
+        )
 
     return (registered, deleted)
 
