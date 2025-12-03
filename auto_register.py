@@ -615,7 +615,8 @@ def scan_and_register(
     label_filter: str = None,
     dry_run: bool = False,
     quiet: bool = False,
-    auto_cleanup: bool = False
+    auto_cleanup: bool = False,
+    verbose: bool = False
 ) -> tuple[int, int]:
     """컨테이너/프로세스 스캔 및 모니터 등록
 
@@ -720,7 +721,7 @@ def scan_and_register(
     else:
         # 실제 등록 + cleanup (단일 연결)
         try:
-            with kuma_api_connection() as api:
+            with kuma_api_connection(debug=verbose) as api:
                 if not quiet:
                     print("\n" + "=" * 60)
                     print("Registering monitors to Uptime Kuma...")
@@ -764,7 +765,8 @@ def watch_loop(
     host_only: bool = False,
     label_filter: str = None,
     dry_run: bool = False,
-    auto_cleanup: bool = False
+    auto_cleanup: bool = False,
+    verbose: bool = False
 ):
     """주기적 감시 루프
 
@@ -776,6 +778,7 @@ def watch_loop(
         label_filter: Docker 라벨 필터
         dry_run: 미리보기 모드
         auto_cleanup: 오프라인 모니터 자동 삭제
+        verbose: 상세 디버그 출력
     """
     global _shutdown_requested
 
@@ -812,7 +815,8 @@ def watch_loop(
                 host_only=host_only,
                 label_filter=label_filter,
                 dry_run=dry_run,
-                quiet=True,  # watch 모드에서는 간결한 출력
+                quiet=not verbose,  # verbose 모드에서는 상세 출력
+                verbose=verbose,
                 auto_cleanup=auto_cleanup
             )
             status = f"registered: {registered}"
@@ -851,6 +855,8 @@ def main():
                         help="감시 주기 (초, 기본: 300)")
     parser.add_argument("--auto-cleanup", action="store_true",
                         help="오프라인 모니터 자동 삭제")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="상세 디버그 출력")
     args = parser.parse_args()
 
     if args.list:
@@ -869,7 +875,8 @@ def main():
             host_only=args.host_only,
             label_filter=args.label,
             dry_run=args.dry_run,
-            auto_cleanup=args.auto_cleanup
+            auto_cleanup=args.auto_cleanup,
+            verbose=args.verbose
         )
         return
 
@@ -881,7 +888,8 @@ def main():
         label_filter=args.label,
         dry_run=args.dry_run,
         quiet=False,
-        auto_cleanup=args.auto_cleanup
+        auto_cleanup=args.auto_cleanup,
+        verbose=args.verbose
     )
 
 
