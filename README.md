@@ -77,6 +77,8 @@ python auto_register.py --list
 | `--include-host` | 호스트 프로세스도 포함 |
 | `--host-only` | 호스트 프로세스만 (Docker 제외) |
 | `--label <라벨>` | 라벨로 컨테이너 필터링 |
+| `--watch` | 주기적 감시 모드 (데몬) |
+| `--interval <초>` | 감시 주기 (기본: 300초) |
 
 ### 포트 타입 자동 판단
 
@@ -111,9 +113,34 @@ python auto_register.py --host 192.168.1.100 --dry-run
 
 **주의**: 원격 호스트 사용 시 해당 IP의 포트가 방화벽에서 열려 있어야 합니다.
 
-## 주기적 실행 (자동화)
+## Watch 모드 (데몬)
 
-스크립트를 주기적으로 실행하여 새로운 컨테이너/프로세스를 자동 등록할 수 있습니다.
+스크립트 내장 감시 모드로 주기적으로 새로운 컨테이너/프로세스를 자동 등록합니다.
+
+```powershell
+# 기본 5분(300초) 주기로 감시
+python auto_register.py --watch --include-host
+
+# 60초 주기로 감시
+python auto_register.py --watch --interval 60
+
+# 미리보기 모드로 감시 (실제 등록 안함)
+python auto_register.py --watch --dry-run
+
+# 백그라운드 실행 (PowerShell)
+Start-Process python -ArgumentList "auto_register.py --watch --include-host" -WindowStyle Hidden
+
+# 종료: Ctrl+C (graceful shutdown)
+```
+
+**Watch 모드 특징:**
+- Ctrl+C로 안전하게 종료 (현재 사이클 완료 후 종료)
+- 새로운 컨테이너/프로세스만 등록 (중복 스킵)
+- 오류 발생 시 다음 사이클 계속 진행
+
+## 외부 스케줄러 사용 (대안)
+
+OS 스케줄러를 사용한 주기적 실행도 가능합니다.
 
 ### Windows Task Scheduler
 

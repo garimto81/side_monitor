@@ -8,6 +8,8 @@ Docker 컨테이너 및 호스트 프로세스 자동 감지 및 Uptime Kuma 모
     python auto_register.py --include-host  # 호스트 프로세스도 포함
     python auto_register.py --host-only     # 호스트 프로세스만
     python auto_register.py --label <라벨>  # 라벨로 컨테이너 필터링
+    python auto_register.py --watch      # 주기적 감시 모드 (기본 300초)
+    python auto_register.py --watch --interval 60  # 60초마다 감시
 """
 
 import subprocess
@@ -16,10 +18,16 @@ import asyncio
 import argparse
 import re
 import shutil
+import signal
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 import os
 from dotenv import load_dotenv
+
+# 전역 변수: 종료 플래그
+_shutdown_requested = False
 
 
 def find_docker_executable() -> str:
@@ -498,6 +506,162 @@ async def list_existing_monitors():
         print("   Install: pip install uptime-kuma-api")
 
 
+def scan_and_register(
+    target_host: str,
+    include_host: bool = False,
+    host_only: bool = False,
+    label_filter: str = None,
+    dry_run: bool = False,
+    quiet: bool = False
+) -> int:
+    """컨테이너/프로세스 스캔 및 모니터 등록
+
+    Args:
+        target_host: 모니터링 대상 호스트
+        include_host: 호스트 프로세스 포함 여부
+        host_only: 호스트 프로세스만 스캔
+        label_filter: Docker 라벨 필터
+        dry_run: 미리보기 모드
+        quiet: 출력 최소화 (watch 모드용)
+
+    Returns:
+        등록된 모니터 수
+    """
+    all_monitors = []
+    containers = []
+    processes = []
+
+    # Docker 컨테이너 조회 (--host-only가 아닌 경우)
+    if not host_only:
+        containers = get_docker_containers(label_filter=label_filter)
+        if containers and not quiet:
+            print_container_summary(containers)
+        for c in containers:
+            monitors = generate_monitor_config(c, host=target_host)
+            all_monitors.extend(monitors)
+
+    # 호스트 프로세스 조회 (--include-host 또는 --host-only인 경우)
+    if include_host or host_only:
+        # Docker 컨테이너가 사용 중인 포트 제외
+        docker_ports = []
+        for c in containers:
+            for p in c.ports:
+                docker_ports.append(p["host_port"])
+
+        processes = get_host_processes(exclude_ports=docker_ports + [22, 135, 139, 445, 3389, 5040, 7680])
+        if processes and not quiet:
+            print_process_summary(processes)
+        for p in processes:
+            monitor = generate_monitor_config_for_process(p, host=target_host)
+            all_monitors.append(monitor)
+
+    if not containers and not processes:
+        if not quiet:
+            print("No running Docker containers or host processes found.")
+        return 0
+
+    if not quiet:
+        print(f"\nTarget host: {target_host}")
+
+    if not all_monitors:
+        if not quiet:
+            print("\nNo ports to monitor.")
+        return 0
+
+    # 생성할 모니터 출력
+    if not quiet:
+        print_monitors_to_create(all_monitors)
+
+    # 등록
+    if dry_run:
+        if not quiet:
+            print("\n[DRY-RUN] No actual registration performed.")
+        return 0
+    else:
+        if not quiet:
+            print("\n" + "=" * 60)
+            print("Registering monitors to Uptime Kuma...")
+            print("=" * 60)
+        asyncio.run(register_monitors_via_api(all_monitors))
+        return len(all_monitors)
+
+
+def _signal_handler(signum, frame):
+    """시그널 핸들러 (graceful shutdown)"""
+    global _shutdown_requested
+    _shutdown_requested = True
+    print("\n[INFO] Shutdown requested. Finishing current cycle...")
+
+
+def watch_loop(
+    target_host: str,
+    interval: int,
+    include_host: bool = False,
+    host_only: bool = False,
+    label_filter: str = None,
+    dry_run: bool = False
+):
+    """주기적 감시 루프
+
+    Args:
+        target_host: 모니터링 대상 호스트
+        interval: 스캔 주기 (초)
+        include_host: 호스트 프로세스 포함 여부
+        host_only: 호스트 프로세스만 스캔
+        label_filter: Docker 라벨 필터
+        dry_run: 미리보기 모드
+    """
+    global _shutdown_requested
+
+    # 시그널 핸들러 등록 (Windows에서는 SIGINT만 지원)
+    signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, _signal_handler)
+
+    print("=" * 60)
+    print("Watch Mode Started")
+    print("=" * 60)
+    print(f"  Target host: {target_host}")
+    print(f"  Interval: {interval} seconds")
+    print(f"  Include host processes: {include_host}")
+    print(f"  Host only: {host_only}")
+    if label_filter:
+        print(f"  Label filter: {label_filter}")
+    if dry_run:
+        print("  Mode: DRY-RUN (no actual registration)")
+    print("\nPress Ctrl+C to stop.\n")
+
+    cycle = 0
+    while not _shutdown_requested:
+        cycle += 1
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        print(f"\n[{timestamp}] Cycle #{cycle} - Scanning...")
+
+        try:
+            registered = scan_and_register(
+                target_host=target_host,
+                include_host=include_host,
+                host_only=host_only,
+                label_filter=label_filter,
+                dry_run=dry_run,
+                quiet=True  # watch 모드에서는 간결한 출력
+            )
+            print(f"[{timestamp}] Cycle #{cycle} - Done. Checked/registered: {registered}")
+        except Exception as e:
+            print(f"[{timestamp}] Cycle #{cycle} - Error: {e}")
+
+        # 종료 요청 확인하면서 대기
+        for _ in range(interval):
+            if _shutdown_requested:
+                break
+            time.sleep(1)
+
+    print("\n" + "=" * 60)
+    print("Watch Mode Stopped")
+    print("=" * 60)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Docker 컨테이너 및 호스트 프로세스 자동 Uptime Kuma 등록")
     parser.add_argument("--dry-run", action="store_true", help="등록하지 않고 미리보기만")
@@ -510,6 +674,10 @@ def main():
                         help="호스트 프로세스만 (Docker 제외)")
     parser.add_argument("--label", type=str, default=None,
                         help="라벨로 컨테이너 필터링 (예: monitor.project=myapp)")
+    parser.add_argument("--watch", action="store_true",
+                        help="주기적 감시 모드")
+    parser.add_argument("--interval", type=int, default=300,
+                        help="감시 주기 (초, 기본: 300)")
     args = parser.parse_args()
 
     if args.list:
@@ -519,55 +687,27 @@ def main():
     # 대상 호스트 결정
     target_host = args.host or DOCKER_HOST_IP
 
-    all_monitors = []
-    containers = []
-    processes = []
-
-    # Docker 컨테이너 조회 (--host-only가 아닌 경우)
-    if not args.host_only:
-        containers = get_docker_containers(label_filter=args.label)
-        if containers:
-            print_container_summary(containers)
-            for c in containers:
-                monitors = generate_monitor_config(c, host=target_host)
-                all_monitors.extend(monitors)
-
-    # 호스트 프로세스 조회 (--include-host 또는 --host-only인 경우)
-    if args.include_host or args.host_only:
-        # Docker 컨테이너가 사용 중인 포트 제외
-        docker_ports = []
-        for c in containers:
-            for p in c.ports:
-                docker_ports.append(p["host_port"])
-
-        processes = get_host_processes(exclude_ports=docker_ports + [22, 135, 139, 445, 3389, 5040, 7680])
-        if processes:
-            print_process_summary(processes)
-            for p in processes:
-                monitor = generate_monitor_config_for_process(p, host=target_host)
-                all_monitors.append(monitor)
-
-    if not containers and not processes:
-        print("No running Docker containers or host processes found.")
+    # Watch 모드
+    if args.watch:
+        watch_loop(
+            target_host=target_host,
+            interval=args.interval,
+            include_host=args.include_host,
+            host_only=args.host_only,
+            label_filter=args.label,
+            dry_run=args.dry_run
+        )
         return
 
-    print(f"\nTarget host: {target_host}")
-
-    if not all_monitors:
-        print("\nNo ports to monitor.")
-        return
-
-    # 생성할 모니터 출력
-    print_monitors_to_create(all_monitors)
-
-    # 등록
-    if args.dry_run:
-        print("\n[DRY-RUN] No actual registration performed.")
-    else:
-        print("\n" + "=" * 60)
-        print("Registering monitors to Uptime Kuma...")
-        print("=" * 60)
-        asyncio.run(register_monitors_via_api(all_monitors))
+    # 일반 모드 (단일 실행)
+    scan_and_register(
+        target_host=target_host,
+        include_host=args.include_host,
+        host_only=args.host_only,
+        label_filter=args.label,
+        dry_run=args.dry_run,
+        quiet=False
+    )
 
 
 if __name__ == "__main__":
