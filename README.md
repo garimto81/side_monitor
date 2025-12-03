@@ -145,9 +145,28 @@ Start-Process python -ArgumentList "auto_register.py --watch --include-host --au
 
 **Auto Cleanup 동작:**
 - 자동 등록된 모니터만 삭제 대상 (수동 등록 모니터는 보존)
+- 삭제 조건:
+  1. **프로세스 미실행**: 더 이상 실행되지 않는 프로세스
+  2. **Uptime Kuma 다운**: heartbeat 상태가 DOWN (0% uptime)
 - 이름 패턴으로 자동 등록 여부 판단:
   - Docker: `{container_name}:{port}` 또는 `{container_name}:{port} (TCP)`
   - Host: `[Host] {process_name}:{port}` 또는 `[Host] {process_name}:{port} (TCP)`
+
+### 백그라운드 서비스 실행
+
+```powershell
+# 방법 1: PowerShell 백그라운드 (세션 종료 시 중단)
+Start-Process python -ArgumentList "D:\AI\claude01\side_monitor\auto_register.py --watch --include-host --auto-cleanup" -WindowStyle Hidden
+
+# 방법 2: nssm으로 Windows 서비스 등록 (영구 실행)
+# nssm 설치: winget install nssm
+nssm install SideMonitor python "D:\AI\claude01\side_monitor\auto_register.py --watch --include-host --auto-cleanup"
+nssm start SideMonitor
+
+# 서비스 중지/삭제
+nssm stop SideMonitor
+nssm remove SideMonitor
+```
 
 ## 외부 스케줄러 사용 (대안)
 
