@@ -4,22 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Docker 컨테이너를 자동으로 감지하여 Uptime Kuma에 모니터로 등록하는 도구입니다.
+Docker 컨테이너 및 호스트 프로세스를 자동으로 감지하여 Uptime Kuma에 모니터로 등록하는 도구입니다.
 
 ## Commands
 
 ```powershell
 # 의존성 설치
-pip install uptime-kuma-api python-dotenv
+pip install -r requirements.txt
 
-# Docker 컨테이너 스캔 (등록 없이 미리보기)
+# Docker 컨테이너만 스캔
 python D:\AI\claude01\side_monitor\auto_register.py --dry-run
 
+# 호스트 프로세스 포함
+python D:\AI\claude01\side_monitor\auto_register.py --include-host --dry-run
+
+# 호스트 프로세스만
+python D:\AI\claude01\side_monitor\auto_register.py --host-only --dry-run
+
 # 실제 Uptime Kuma에 모니터 등록
-python D:\AI\claude01\side_monitor\auto_register.py
+python D:\AI\claude01\side_monitor\auto_register.py --include-host
 
 # 원격 호스트 지정 (동일 네트워크에서 모니터링)
-python D:\AI\claude01\side_monitor\auto_register.py --host 192.168.1.100
+python D:\AI\claude01\side_monitor\auto_register.py --host 192.168.1.100 --include-host
 
 # 등록된 모니터 목록 확인
 python D:\AI\claude01\side_monitor\auto_register.py --list
@@ -29,11 +35,13 @@ python D:\AI\claude01\side_monitor\auto_register.py --list
 
 ```
 auto_register.py
-├── get_docker_containers()     # docker ps 실행 → ContainerInfo 리스트
-├── parse_ports()               # Docker 포트 문자열 파싱
-├── generate_monitor_config()   # 포트 타입에 따라 HTTP/TCP 모니터 설정 생성
-├── register_monitors_via_api() # uptime-kuma-api로 실제 등록
-└── list_existing_monitors()    # 현재 등록된 모니터 조회
+├── get_docker_containers()              # docker ps → ContainerInfo 리스트
+├── get_host_processes()                 # psutil → ProcessInfo 리스트
+├── parse_ports()                        # Docker 포트 문자열 파싱
+├── generate_monitor_config()            # 컨테이너 → 모니터 설정
+├── generate_monitor_config_for_process()# 프로세스 → 모니터 설정
+├── register_monitors_via_api()          # uptime-kuma-api로 실제 등록
+└── list_existing_monitors()             # 현재 등록된 모니터 조회
 ```
 
 ### Port Type Detection
