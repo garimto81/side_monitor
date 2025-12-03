@@ -7,6 +7,7 @@ Docker 컨테이너 및 호스트 프로세스 자동 감지 및 Uptime Kuma 모
     python auto_register.py --list       # 현재 등록된 모니터 목록
     python auto_register.py --include-host  # 호스트 프로세스도 포함
     python auto_register.py --host-only     # 호스트 프로세스만
+    python auto_register.py --label <라벨>  # 라벨로 컨테이너 필터링
 """
 
 import subprocess
@@ -52,6 +53,9 @@ KUMA_PASSWORD = os.getenv("KUMA_PASSWORD", "")
 
 # Docker 호스트 설정 (원격 모니터링용)
 DOCKER_HOST_IP = os.getenv("DOCKER_HOST_IP", "localhost")
+
+# 컨테이너 필터링 설정
+FILTER_LABEL = os.getenv("FILTER_LABEL", "")
 
 
 @dataclass
@@ -138,12 +142,23 @@ def get_host_processes(exclude_ports: list[int] = None) -> list[ProcessInfo]:
     return processes
 
 
-def get_docker_containers() -> list[ContainerInfo]:
-    """실행 중인 Docker 컨테이너 목록 조회"""
+def get_docker_containers(label_filter: str = None) -> list[ContainerInfo]:
+    """실행 중인 Docker 컨테이너 목록 조회
+
+    Args:
+        label_filter: 라벨 필터 (예: "monitor.project=side_monitor")
+    """
     try:
         docker_cmd = find_docker_executable()
+        cmd = [docker_cmd, "ps", "--format", "{{json .}}"]
+
+        # 라벨 필터 적용
+        filter_label = label_filter or FILTER_LABEL
+        if filter_label:
+            cmd.extend(["--filter", f"label={filter_label}"])
+
         result = subprocess.run(
-            [docker_cmd, "ps", "--format", "{{json .}}"],
+            cmd,
             capture_output=True,
             text=True,
             check=True,
@@ -493,6 +508,8 @@ def main():
                         help="호스트 프로세스도 포함")
     parser.add_argument("--host-only", action="store_true",
                         help="호스트 프로세스만 (Docker 제외)")
+    parser.add_argument("--label", type=str, default=None,
+                        help="라벨로 컨테이너 필터링 (예: monitor.project=myapp)")
     args = parser.parse_args()
 
     if args.list:
@@ -508,7 +525,7 @@ def main():
 
     # Docker 컨테이너 조회 (--host-only가 아닌 경우)
     if not args.host_only:
-        containers = get_docker_containers()
+        containers = get_docker_containers(label_filter=args.label)
         if containers:
             print_container_summary(containers)
             for c in containers:
