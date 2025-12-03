@@ -16,12 +16,13 @@ Docker 컨테이너 및 호스트 프로세스 자동 감지 및 Uptime Kuma 모
 
 import subprocess
 import json
-import asyncio
 import argparse
 import re
 import shutil
 import signal
+import socket
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -66,6 +67,37 @@ DOCKER_HOST_IP = os.getenv("DOCKER_HOST_IP", "localhost")
 
 # 컨테이너 필터링 설정
 FILTER_LABEL = os.getenv("FILTER_LABEL", "")
+
+# API 연결 Timeout (초)
+API_TIMEOUT = 10
+
+
+@contextmanager
+def kuma_api_connection(timeout: int = API_TIMEOUT):
+    """Uptime Kuma API 연결 관리 컨텍스트 매니저
+
+    WebSocket 연결을 안전하게 관리하고 자동으로 disconnect 보장
+    """
+    from uptime_kuma_api import UptimeKumaApi
+
+    # 전역 소켓 타임아웃 설정
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
+
+    api = None
+    try:
+        api = UptimeKumaApi(KUMA_URL)
+        api.login(KUMA_USERNAME, KUMA_PASSWORD)
+        yield api
+    finally:
+        # 연결 정리
+        if api:
+            try:
+                api.disconnect()
+            except Exception:
+                pass
+        # 소켓 타임아웃 복원
+        socket.setdefaulttimeout(old_timeout)
 
 
 @dataclass
@@ -419,93 +451,92 @@ def print_monitors_to_create(monitors: list[dict]):
         print(f"   Interval: {m['interval']}s")
 
 
-async def register_monitors_via_api(monitors: list[dict]):
-    """Uptime Kuma API로 모니터 등록 (uptime-kuma-api 라이브러리 사용)"""
-    try:
-        from uptime_kuma_api import UptimeKumaApi, MonitorType
+def register_monitors_with_api(api, monitors: list[dict], quiet: bool = False) -> int:
+    """API 연결을 사용하여 모니터 등록 (단일 연결 재사용)
 
-        api = UptimeKumaApi(KUMA_URL)
-        api.login(KUMA_USERNAME, KUMA_PASSWORD)
+    Args:
+        api: UptimeKumaApi 인스턴스 (이미 로그인됨)
+        monitors: 등록할 모니터 설정 목록
+        quiet: 출력 최소화
 
-        # 기존 모니터 목록 조회
-        existing = api.get_monitors()
-        existing_names = {m["name"] for m in existing}
+    Returns:
+        등록된 모니터 수
+    """
+    from uptime_kuma_api import MonitorType
 
-        created = 0
-        skipped = 0
+    # 기존 모니터 목록 조회
+    existing = api.get_monitors()
+    existing_names = {m["name"] for m in existing}
 
-        for m in monitors:
-            if m["name"] in existing_names:
+    created = 0
+    skipped = 0
+
+    for m in monitors:
+        if m["name"] in existing_names:
+            if not quiet:
                 print(f"[SKIP] Already exists: {m['name']}")
-                skipped += 1
-                continue
+            skipped += 1
+            continue
 
-            try:
-                if m["type"] == "http":
-                    api.add_monitor(
-                        type=MonitorType.HTTP,
-                        name=m["name"],
-                        url=m["url"],
-                        method=m.get("method", "GET"),
-                        interval=m["interval"],
-                        retryInterval=m.get("retryInterval", 60),
-                        maxretries=m.get("maxretries", 3),
-                        accepted_statuscodes=m.get("accepted_statuscodes", ["200-299"]),
-                    )
-                else:
-                    api.add_monitor(
-                        type=MonitorType.PORT,
-                        name=m["name"],
-                        hostname=m["hostname"],
-                        port=m["port"],
-                        interval=m["interval"],
-                        retryInterval=m.get("retryInterval", 60),
-                        maxretries=m.get("maxretries", 3),
-                    )
+        try:
+            if m["type"] == "http":
+                api.add_monitor(
+                    type=MonitorType.HTTP,
+                    name=m["name"],
+                    url=m["url"],
+                    method=m.get("method", "GET"),
+                    interval=m["interval"],
+                    retryInterval=m.get("retryInterval", 60),
+                    maxretries=m.get("maxretries", 3),
+                    accepted_statuscodes=m.get("accepted_statuscodes", ["200-299"]),
+                )
+            else:
+                api.add_monitor(
+                    type=MonitorType.PORT,
+                    name=m["name"],
+                    hostname=m["hostname"],
+                    port=m["port"],
+                    interval=m["interval"],
+                    retryInterval=m.get("retryInterval", 60),
+                    maxretries=m.get("maxretries", 3),
+                )
+            if not quiet:
                 print(f"[OK] Created: {m['name']}")
-                created += 1
-            except Exception as e:
+            created += 1
+        except Exception as e:
+            if not quiet:
                 print(f"[FAIL] {m['name']} - {e}")
 
-        api.disconnect()
-
+    if not quiet:
         print(f"\nResult: {created} created, {skipped} skipped")
 
-    except ImportError:
-        print("\n[WARN] uptime-kuma-api library required.")
-        print("   Install: pip install uptime-kuma-api")
-        print("\nManually add monitors in Uptime Kuma:")
-        print(f"   URL: {KUMA_URL}")
+    return created
 
 
-async def list_existing_monitors():
+def list_existing_monitors():
     """기존 모니터 목록 출력"""
     try:
-        from uptime_kuma_api import UptimeKumaApi
+        with kuma_api_connection() as api:
+            monitors = api.get_monitors()
 
-        api = UptimeKumaApi(KUMA_URL)
-        api.login(KUMA_USERNAME, KUMA_PASSWORD)
+            print("\n" + "=" * 60)
+            print(f"Uptime Kuma Registered Monitors ({len(monitors)})")
+            print("=" * 60)
 
-        monitors = api.get_monitors()
-
-        print("\n" + "=" * 60)
-        print(f"Uptime Kuma Registered Monitors ({len(monitors)})")
-        print("=" * 60)
-
-        for m in monitors:
-            status_icon = "[ON]" if m.get("active") else "[OFF]"
-            print(f"\n{status_icon} {m['name']}")
-            print(f"   Type: {m['type']}")
-            if m.get("url"):
-                print(f"   URL: {m['url']}")
-            if m.get("hostname"):
-                print(f"   Host: {m['hostname']}:{m.get('port', '')}")
-
-        api.disconnect()
+            for m in monitors:
+                status_icon = "[ON]" if m.get("active") else "[OFF]"
+                print(f"\n{status_icon} {m['name']}")
+                print(f"   Type: {m['type']}")
+                if m.get("url"):
+                    print(f"   URL: {m['url']}")
+                if m.get("hostname"):
+                    print(f"   Host: {m['hostname']}:{m.get('port', '')}")
 
     except ImportError:
         print("[WARN] uptime-kuma-api library required.")
         print("   Install: pip install uptime-kuma-api")
+    except Exception as e:
+        print(f"[ERROR] Failed to connect: {e}")
 
 
 def is_auto_registered_monitor(name: str) -> bool:
@@ -524,14 +555,16 @@ def is_auto_registered_monitor(name: str) -> bool:
     return bool(re.match(docker_pattern, name) or re.match(host_pattern, name))
 
 
-def cleanup_offline_monitors(
+def cleanup_offline_monitors_with_api(
+    api,
     active_monitor_names: set[str],
     dry_run: bool = False,
     quiet: bool = False
 ) -> int:
-    """오프라인 모니터 삭제 (Uptime Kuma에서 더 이상 실행되지 않는 서비스 제거)
+    """API 연결을 사용하여 오프라인 모니터 삭제 (단일 연결 재사용)
 
     Args:
+        api: UptimeKumaApi 인스턴스 (이미 로그인됨)
         active_monitor_names: 현재 실행 중인 모니터 이름 집합
         dry_run: 미리보기 모드
         quiet: 출력 최소화
@@ -539,53 +572,40 @@ def cleanup_offline_monitors(
     Returns:
         삭제된 모니터 수
     """
-    try:
-        from uptime_kuma_api import UptimeKumaApi
+    existing = api.get_monitors()
+    deleted = 0
 
-        api = UptimeKumaApi(KUMA_URL)
-        api.login(KUMA_USERNAME, KUMA_PASSWORD)
+    for m in existing:
+        name = m["name"]
+        monitor_id = m["id"]
 
-        existing = api.get_monitors()
-        deleted = 0
+        # 자동 등록된 모니터만 대상으로 함
+        if not is_auto_registered_monitor(name):
+            continue
 
-        for m in existing:
-            name = m["name"]
-            monitor_id = m["id"]
+        # 현재 실행 중이면 스킵
+        if name in active_monitor_names:
+            continue
 
-            # 자동 등록된 모니터만 대상으로 함
-            if not is_auto_registered_monitor(name):
-                continue
-
-            # 현재 실행 중이면 스킵
-            if name in active_monitor_names:
-                continue
-
-            # 오프라인 모니터 삭제
-            if dry_run:
+        # 오프라인 모니터 삭제
+        if dry_run:
+            if not quiet:
+                print(f"[DRY-RUN] Would delete: {name}")
+            deleted += 1
+        else:
+            try:
+                api.delete_monitor(monitor_id)
                 if not quiet:
-                    print(f"[DRY-RUN] Would delete: {name}")
+                    print(f"[DELETED] {name}")
                 deleted += 1
-            else:
-                try:
-                    api.delete_monitor(monitor_id)
-                    if not quiet:
-                        print(f"[DELETED] {name}")
-                    deleted += 1
-                except Exception as e:
-                    if not quiet:
-                        print(f"[FAIL] Delete {name} - {e}")
+            except Exception as e:
+                if not quiet:
+                    print(f"[FAIL] Delete {name} - {e}")
 
-        api.disconnect()
+    if deleted > 0 and not quiet:
+        print(f"\nCleanup: {deleted} offline monitor(s) {'would be ' if dry_run else ''}removed")
 
-        if deleted > 0 and not quiet:
-            print(f"\nCleanup: {deleted} offline monitor(s) {'would be ' if dry_run else ''}removed")
-
-        return deleted
-
-    except ImportError:
-        if not quiet:
-            print("[WARN] uptime-kuma-api library required for cleanup.")
-        return 0
+    return deleted
 
 
 def scan_and_register(
@@ -648,11 +668,17 @@ def scan_and_register(
         # cleanup만 수행 (컨테이너/프로세스가 없어도 기존 모니터 정리)
         deleted = 0
         if auto_cleanup:
-            deleted = cleanup_offline_monitors(
-                active_monitor_names=set(),
-                dry_run=dry_run,
-                quiet=quiet
-            )
+            try:
+                with kuma_api_connection() as api:
+                    deleted = cleanup_offline_monitors_with_api(
+                        api,
+                        active_monitor_names=set(),
+                        dry_run=dry_run,
+                        quiet=quiet
+                    )
+            except Exception as e:
+                if not quiet:
+                    print(f"[ERROR] Cleanup failed: {e}")
         return (0, deleted)
 
     if not quiet:
@@ -667,31 +693,59 @@ def scan_and_register(
     if not quiet:
         print_monitors_to_create(all_monitors)
 
-    # 등록
+    # 등록 및 정리 (단일 API 연결 사용)
     registered = 0
+    deleted = 0
+
     if dry_run:
         if not quiet:
             print("\n[DRY-RUN] No actual registration performed.")
+        # dry-run cleanup
+        if auto_cleanup:
+            if not quiet:
+                print("\n" + "=" * 60)
+                print("Cleaning up offline monitors...")
+                print("=" * 60)
+            try:
+                with kuma_api_connection() as api:
+                    deleted = cleanup_offline_monitors_with_api(
+                        api,
+                        active_monitor_names=active_monitor_names,
+                        dry_run=True,
+                        quiet=quiet
+                    )
+            except Exception as e:
+                if not quiet:
+                    print(f"[ERROR] Cleanup failed: {e}")
     else:
-        if not quiet:
-            print("\n" + "=" * 60)
-            print("Registering monitors to Uptime Kuma...")
-            print("=" * 60)
-        asyncio.run(register_monitors_via_api(all_monitors))
-        registered = len(all_monitors)
+        # 실제 등록 + cleanup (단일 연결)
+        try:
+            with kuma_api_connection() as api:
+                if not quiet:
+                    print("\n" + "=" * 60)
+                    print("Registering monitors to Uptime Kuma...")
+                    print("=" * 60)
+                registered = register_monitors_with_api(api, all_monitors, quiet=quiet)
 
-    # 오프라인 모니터 정리
-    deleted = 0
-    if auto_cleanup:
-        if not quiet:
-            print("\n" + "=" * 60)
-            print("Cleaning up offline monitors...")
-            print("=" * 60)
-        deleted = cleanup_offline_monitors(
-            active_monitor_names=active_monitor_names,
-            dry_run=dry_run,
-            quiet=quiet
-        )
+                # 오프라인 모니터 정리 (동일 연결 재사용)
+                if auto_cleanup:
+                    if not quiet:
+                        print("\n" + "=" * 60)
+                        print("Cleaning up offline monitors...")
+                        print("=" * 60)
+                    deleted = cleanup_offline_monitors_with_api(
+                        api,
+                        active_monitor_names=active_monitor_names,
+                        dry_run=False,
+                        quiet=quiet
+                    )
+        except ImportError:
+            if not quiet:
+                print("[WARN] uptime-kuma-api library required.")
+                print("   Install: pip install uptime-kuma-api")
+        except Exception as e:
+            if not quiet:
+                print(f"[ERROR] API connection failed: {e}")
 
     return (registered, deleted)
 
@@ -800,7 +854,7 @@ def main():
     args = parser.parse_args()
 
     if args.list:
-        asyncio.run(list_existing_monitors())
+        list_existing_monitors()
         return
 
     # 대상 호스트 결정
