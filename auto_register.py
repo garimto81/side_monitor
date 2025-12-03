@@ -25,6 +25,9 @@ KUMA_URL = os.getenv("KUMA_URL", "http://localhost:3001")
 KUMA_USERNAME = os.getenv("KUMA_USERNAME", "")
 KUMA_PASSWORD = os.getenv("KUMA_PASSWORD", "")
 
+# Docker 호스트 설정 (원격 모니터링용)
+DOCKER_HOST_IP = os.getenv("DOCKER_HOST_IP", "localhost")
+
 
 @dataclass
 class ContainerInfo:
@@ -112,9 +115,15 @@ def parse_ports(ports_str: str) -> list[dict]:
     return ports
 
 
-def generate_monitor_config(container: ContainerInfo) -> list[dict]:
-    """컨테이너 정보로 모니터 설정 생성"""
+def generate_monitor_config(container: ContainerInfo, host: str = None) -> list[dict]:
+    """컨테이너 정보로 모니터 설정 생성
+
+    Args:
+        container: Docker 컨테이너 정보
+        host: 모니터링 대상 호스트 (기본값: DOCKER_HOST_IP 환경변수 또는 localhost)
+    """
     monitors = []
+    target_host = host or DOCKER_HOST_IP
 
     # TCP 전용 포트 (데이터베이스, 캐시 등)
     tcp_only_ports = [5432, 3306, 27017, 6379, 5379, 11211, 9042]
@@ -133,7 +142,7 @@ def generate_monitor_config(container: ContainerInfo) -> list[dict]:
             monitors.append({
                 "type": "port",
                 "name": f"{container.name}:{host_port} (TCP)",
-                "hostname": "localhost",
+                "hostname": target_host,
                 "port": host_port,
                 "interval": 60,
                 "retryInterval": 60,
@@ -144,7 +153,7 @@ def generate_monitor_config(container: ContainerInfo) -> list[dict]:
             monitor = {
                 "type": "http",
                 "name": f"{container.name}:{host_port}",
-                "url": f"http://localhost:{host_port}",
+                "url": f"http://{target_host}:{host_port}",
                 "method": "GET",
                 "interval": 60,
                 "retryInterval": 60,
@@ -154,7 +163,7 @@ def generate_monitor_config(container: ContainerInfo) -> list[dict]:
 
             # health 엔드포인트 추가 시도
             if "api" in container.name.lower() or "backend" in container.name.lower():
-                monitor["url"] = f"http://localhost:{host_port}/health"
+                monitor["url"] = f"http://{target_host}:{host_port}/health"
 
             monitors.append(monitor)
         else:
@@ -162,7 +171,7 @@ def generate_monitor_config(container: ContainerInfo) -> list[dict]:
             monitors.append({
                 "type": "port",
                 "name": f"{container.name}:{host_port} (TCP)",
-                "hostname": "localhost",
+                "hostname": target_host,
                 "port": host_port,
                 "interval": 60,
                 "retryInterval": 60,
@@ -303,6 +312,8 @@ def main():
     parser = argparse.ArgumentParser(description="Docker 컨테이너 자동 Uptime Kuma 등록")
     parser.add_argument("--dry-run", action="store_true", help="등록하지 않고 미리보기만")
     parser.add_argument("--list", action="store_true", help="현재 등록된 모니터 목록")
+    parser.add_argument("--host", type=str, default=None,
+                        help="Docker 호스트 IP/hostname (기본: DOCKER_HOST_IP 환경변수 또는 localhost)")
     args = parser.parse_args()
 
     if args.list:
@@ -319,10 +330,14 @@ def main():
     # 컨테이너 요약 출력
     print_container_summary(containers)
 
+    # 대상 호스트 결정
+    target_host = args.host or DOCKER_HOST_IP
+    print(f"\nTarget host: {target_host}")
+
     # 모니터 설정 생성
     all_monitors = []
     for c in containers:
-        monitors = generate_monitor_config(c)
+        monitors = generate_monitor_config(c, host=target_host)
         all_monitors.extend(monitors)
 
     if not all_monitors:

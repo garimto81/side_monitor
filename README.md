@@ -59,6 +59,7 @@ python auto_register.py --list
 | 포트 타입 자동 판단 | HTTP vs TCP 자동 구분 |
 | Uptime Kuma API 연동 | 모니터 자동 등록 |
 | 중복 방지 | 이미 등록된 모니터는 스킵 |
+| 원격 호스트 지원 | 동일 네트워크의 다른 서버에서 모니터링 가능 |
 
 ### 포트 타입 자동 판단
 
@@ -74,6 +75,24 @@ python auto_register.py --list
 docker run -d -p 9000:9000 my-new-service
 python auto_register.py
 ```
+
+### 원격 호스트 모니터링
+
+Uptime Kuma가 다른 서버(예: NAS)에서 실행 중일 때, Docker 호스트의 컨테이너를 모니터링하려면:
+
+```powershell
+# 방법 1: CLI 옵션 사용
+python auto_register.py --host 192.168.1.100
+
+# 방법 2: 환경 변수 사용 (.env 파일)
+# DOCKER_HOST_IP=192.168.1.100
+python auto_register.py
+
+# 미리보기
+python auto_register.py --host 192.168.1.100 --dry-run
+```
+
+**주의**: 원격 호스트 사용 시 해당 IP의 포트가 방화벽에서 열려 있어야 합니다.
 
 ## 주의사항
 
